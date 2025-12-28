@@ -23,40 +23,53 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 genai.configure(api_key=GEMINI_API_KEY)
 notion = Client(auth=NOTION_API_KEY)
 
-# --- 這裡先設定一個預設模型，避免變數沒定義 ---
-model = genai.GenerativeModel('gemini-2.5-flash') 
+# 改用最穩定的 pro 模型
+model = genai.GenerativeModel('gemini-2.5-flash')
 
-def process_text_with_gemini(user_text):
+def process_intent_with_gemini(user_text):
     """
-    使用 Gemini 將輸入整理成結構化資料
+    讓 Gemini 判斷這是「聊天」還是「筆記」，並回傳對應格式
     """
     prompt = f"""
-    你是一個個人助理。請將使用者的輸入整理成 Notion 筆記格式。
+    你是一個聰明的個人助理。請分析使用者的輸入，判斷他的意圖是「純聊天」還是「想要紀錄事情」。
+
     使用者輸入: "{user_text}"
-    
-    請嚴格依照以下格式回傳，用 "|||" 分隔三個部分：
-    標題|||標籤|||詳細內文
-    
-    規則：
-    1. 標籤請從這幾個選一個最適合的：[待辦, 筆記, 學校, 靈感, 購物]
-    2. 內文請整理成易讀的格式
-    
-    範例輸入: 明天要交VLSI作業，還要記得買牛奶
-    範例輸出: 繳交作業與購物|||待辦|||- 完成 VLSI 作業\n- 購買牛奶
+
+    請嚴格遵守以下兩種回傳格式之一（不要有額外的 Markdown 符號）：
+
+    情況一：如果是閒聊、問知識、打招呼 (例如：你好、解釋量子力學、講個笑話)
+    回傳格式：
+    CHAT|||這裡放你對使用者的友善回應
+
+    情況二：如果是想要紀錄、待辦事項、備忘錄 (例如：提醒我買牛奶、紀錄今天開會重點、記帳)
+    回傳格式：
+    SAVE|||標題|||標籤|||詳細內文
+
+    關於 SAVE 格式的規則：
+    1. 標題：簡短扼要
+    2. 標籤：從 [待辦, 筆記, 學校, 靈感, 購物, 財務] 選一個最適合的
+    3. 詳細內文：請將使用者的輸入整理成條列式或詳細說明，放在這裡。
     """
+    
     try:
         response = model.generate_content(prompt)
-        if "|||" in response.text:
-            parts = response.text.split("|||")
-            if len(parts) >= 3:
-                return parts[0].strip(), parts[1].strip(), parts[2].strip()
-        return "新筆記", "筆記", user_text
+        text = response.text.strip()
+        
+        # 簡單防呆：確保回傳格式正確
+        if "|||" in text:
+            return text.split("|||")
+        else:
+            # 如果格式跑掉，預設當作聊天回應
+            return ["CHAT", text]
+            
     except Exception as e:
         app.logger.error(f"Gemini Error: {e}")
-        # 如果失敗，回傳錯誤原因讓你知道
-        return "Error Note", "錯誤", str(e)
+        return ["CHAT", "抱歉，我現在有點秀逗，請稍後再試。"]
 
 def save_to_notion(title, tag, content):
+    """
+    寫入 Notion：標題與標籤在欄位，詳細內容在頁面內文
+    """
     try:
         response = notion.pages.create(
             parent={"database_id": NOTION_DATABASE_ID},
@@ -65,6 +78,13 @@ def save_to_notion(title, tag, content):
                 "Tag": {"multi_select": [{"name": tag}]}
             },
             children=[
+                {
+                    "object": "block",
+                    "type": "heading_2",
+                    "heading_2": {
+                        "rich_text": [{"type": "text", "text": {"content": "詳細筆記內容"}}]
+                    }
+                },
                 {
                     "object": "block",
                     "type": "paragraph",
@@ -83,7 +103,6 @@ def save_to_notion(title, tag, content):
 def callback():
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
-    app.logger.info("Request body: " + body)
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
@@ -92,48 +111,39 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    user_msg = event.message.text.strip() # 去除前後空白
-
-    # === 🕵️‍♂️ 密技指令區：輸入 "debug" 就會執行這段 ===
-    if user_msg.lower() == "debug":
-        reply_text = "🔍 正在查詢可用模型...\n"
-        try:
-            available_models = []
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    available_models.append(m.name)
-                    # 也順便印到 Log 裡給你備查
-                    app.logger.info(f"Find Model: {m.name}")
-            
-            if available_models:
-                reply_text += "✅ 找到以下模型：\n" + "\n".join(available_models)
-            else:
-                reply_text += "⚠️ 沒有找到任何支援 generateContent 的模型"
-                
-        except Exception as e:
-            reply_text += f"❌ 查詢失敗: {str(e)}"
-            app.logger.error(f"List Models Error: {e}")
-
-        # 直接回傳給使用者
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=reply_text)
-        )
-        return # 結束，不繼續執行後面的 Notion 存檔
-    # =================================================
-
-    # 正常的筆記流程
-    title, tag, content = process_text_with_gemini(user_msg)
-    notion_url = save_to_notion(title, tag, content)
+    user_msg = event.message.text.strip()
     
-    if notion_url:
-        reply = f"✅ 已存入 Notion\n📌 [{tag}] {title}\n\n{content}\n\n🔗 {notion_url}"
+    # 1. 呼叫 Gemini 進行意圖判斷
+    result = process_intent_with_gemini(user_msg)
+    
+    # 取出判斷結果 (Action)
+    action = result[0].strip().upper()
+    
+    if action == "SAVE" and len(result) >= 4:
+        # --- 進入存檔流程 ---
+        title = result[1].strip()
+        tag = result[2].strip()
+        content = result[3].strip()
+        
+        notion_url = save_to_notion(title, tag, content)
+        
+        if notion_url:
+            reply_text = f"✅ 已幫你紀錄！\n\n📌 標題：{title}\n🏷️ 標籤：{tag}\n📝 內容：{content}\n\n🔗 連結：{notion_url}"
+        else:
+            reply_text = "❌ 寫入 Notion 失敗，請檢查 Log。"
+            
+    elif action == "CHAT":
+        # --- 進入聊天流程 ---
+        # result[1] 就是 Gemini 的回應內容
+        reply_text = result[1].strip() if len(result) > 1 else "（沈默）"
+        
     else:
-        reply = f"❌ 寫入 Notion 失敗\nGemini 回應: {content}"
+        # --- 格式無法辨識時的備案 ---
+        reply_text = result[-1] # 直接把最後一段文字回傳
 
     line_bot_api.reply_message(
         event.reply_token,
-        TextSendMessage(text=reply)
+        TextSendMessage(text=reply_text)
     )
 
 if __name__ == "__main__":
