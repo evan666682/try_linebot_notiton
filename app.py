@@ -23,6 +23,18 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 genai.configure(api_key=GEMINI_API_KEY)
 notion = Client(auth=NOTION_API_KEY)
 
+# =========== 新增這段檢查代碼 (開始) ===========
+print("=== 正在檢查 Google Gemini 可用模型 ===")
+try:
+    for m in genai.list_models():
+        # 只列出可以「產生內容」的模型
+        if 'generateContent' in m.supported_generation_methods:
+            print(f"找到模型: {m.name}")
+except Exception as e:
+    print(f"❌ 查詢模型失敗: {e}")
+print("==========================================")
+# =========== 新增這段檢查代碼 (結束) ===========
+
 def process_text_with_gemini(user_text):
     """
     使用 Gemini 將輸入整理成結構化資料 (標題、標籤、內文)
