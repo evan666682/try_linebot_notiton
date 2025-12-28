@@ -27,7 +27,7 @@ def process_text_with_gemini(user_text):
     """
     使用 Gemini 將輸入整理成結構化資料 (標題、標籤、內文)
     """
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-pro')
     prompt = f"""
     你是一個個人助理。請將使用者的輸入整理成 Notion 筆記格式。
     使用者輸入: "{user_text}"
