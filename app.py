@@ -3,7 +3,7 @@ import logging
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import TextMessage, TextSendMessage
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import google.generativeai as genai
 from notion_client import Client
 
@@ -11,7 +11,6 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
 # --- 環境變數設定 ---
-# 請確保這些變數在 Render 或 .env 檔案中都已設定
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
@@ -87,13 +86,15 @@ def save_to_notion(title, tag, content):
 def callback():
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
+    app.logger.info("Request body: " + body)
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
         abort(400)
     return 'OK'
 
-@handler.add(TextMessage)
+# 修正處：這裡改用 MessageEvent 確保能正確捕捉訊息
+@handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_msg = event.message.text
     
